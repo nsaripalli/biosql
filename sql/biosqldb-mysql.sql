@@ -1,8 +1,8 @@
 -- $Id$
 --
 -- Copyright 2002-2003 Ewan Birney, Elia Stupka, Chris Mungall
--- Copyright 2003-2008 Hilmar Lapp 
--- 
+-- Copyright 2003-2008 Hilmar Lapp
+-- Copyright 2018 Nithin Saripalli
 --  This file is part of BioSQL.
 --
 --  BioSQL is free software: you can redistribute it and/or modify it
@@ -44,739 +44,598 @@
 -- we do not store different versions of a database as different dbids
 -- (there is no concept of versions of database). There is a concept of
 -- versions of entries. Versions of databases deserve their own table and
--- join to bioentry table for tracking with versions of entries 
-
-CREATE TABLE biodatabase (
-  	biodatabase_id 	INT(10) UNSIGNED NOT NULL auto_increment,
-  	name           	VARCHAR(128) BINARY NOT NULL,
-	authority	VARCHAR(128),
-	description	TEXT,
-	PRIMARY KEY (biodatabase_id),
-  	UNIQUE (name)
-) ENGINE=INNODB;
-
-CREATE INDEX db_auth on biodatabase(authority);
-
--- we could insist that taxa are NCBI taxon id, but on reflection I made this
--- an optional extra line, as many flat file formats do not have the NCBI id
---
--- no organelle/sub species
---
--- this corresponds to the node table of the NCBI taxonomy database 
--- left_value, right_value implement a nested sets model;
--- see http://www.oreillynet.com/pub/a/network/2002/11/27/bioconf.html
--- or Joe Celko's 'SQL for smarties' for more information.
-CREATE TABLE taxon (
-       taxon_id		INT(10) UNSIGNED NOT NULL auto_increment,
-       ncbi_taxon_id 	INT(10),
-       parent_taxon_id	INT(10) UNSIGNED,
-       node_rank	VARCHAR(32),
-       genetic_code	TINYINT UNSIGNED,
-       mito_genetic_code TINYINT UNSIGNED,
-       left_value	INT(10) UNSIGNED,
-       right_value	INT(10) UNSIGNED,
-       PRIMARY KEY (taxon_id),
-       UNIQUE (ncbi_taxon_id),
-       UNIQUE (left_value),
-       UNIQUE (right_value)
-) ENGINE=INNODB;
-
-CREATE INDEX taxparent ON taxon(parent_taxon_id);
-
--- corresponds to the names table of the NCBI taxonomy databaase
-CREATE TABLE taxon_name (
-       taxon_id		INT(10) UNSIGNED NOT NULL,
-       name		VARCHAR(255) BINARY NOT NULL,
-       name_class	VARCHAR(32) BINARY NOT NULL,
-       UNIQUE (taxon_id,name,name_class)
-) ENGINE=INNODB;
-
-CREATE INDEX taxnametaxonid ON taxon_name(taxon_id);
-CREATE INDEX taxnamename    ON taxon_name(name);
-
--- this is the namespace (controlled vocabulary) ontology terms live in
--- we chose to have a separate table for this instead of reusing biodatabase
-CREATE TABLE ontology (
-       	ontology_id        INT(10) UNSIGNED NOT NULL auto_increment,
-       	name	   	   VARCHAR(32) BINARY NOT NULL,
-       	definition	   TEXT,
-	PRIMARY KEY (ontology_id),
-	UNIQUE (name)
-) ENGINE=INNODB;
-
--- any controlled vocab term, everything from full ontology
--- terms eg GO IDs to the various keys allowed as qualifiers
-CREATE TABLE term (
-       	term_id   INT(10) UNSIGNED NOT NULL auto_increment,
-       	name	   	   VARCHAR(255) BINARY NOT NULL,
-       	definition	   TEXT,
-	identifier	   VARCHAR(40) BINARY,
-	is_obsolete	   CHAR(1),
-	ontology_id	   INT(10) UNSIGNED NOT NULL,
-	PRIMARY KEY (term_id),
-	UNIQUE (identifier),
--- CONFIG: uncomment exactly one of the two following lines. The
--- first one puts a unqiueness constraint on term name within an
--- ontology, which is a conservative approach. However, if you are
--- going to load GO and update it too, there are situations where
--- you'll run into problems with this constraint unless you delete
--- obsoleted terms (which has its own shortcomings, read the POD of
--- load_ontology.pl in bioperl-db). The second line includes the
--- obsoleteness into the uniqueness constraint.
---        UNIQUE (name,ontology_id)
-          UNIQUE (name,ontology_id,is_obsolete)
-) ENGINE=INNODB;
-
-CREATE INDEX term_ont ON term(ontology_id);
-
--- ontology terms have synonyms, here is how to store them
--- Synonym is a reserved word in many RDBMSs, so the column synonym
--- may eventually be renamed to name.
-CREATE TABLE term_synonym (
-       synonym		  VARCHAR(255) BINARY NOT NULL,
-       term_id		  INT(10) UNSIGNED NOT NULL,
-       PRIMARY KEY (term_id,synonym)
-) ENGINE=INNODB;
-
--- ontology terms to dbxref association: ontology terms have dbxrefs
-CREATE TABLE term_dbxref (
-       	term_id	          INT(10) UNSIGNED NOT NULL,
-       	dbxref_id         INT(10) UNSIGNED NOT NULL,
-	rank		  SMALLINT,
-	PRIMARY KEY (term_id, dbxref_id)
-) ENGINE=INNODB;
-
-CREATE INDEX trmdbxref_dbxrefid ON term_dbxref(dbxref_id);
-
--- relationship between controlled vocabulary / ontology term
--- we use subject/predicate/object but this could also
--- be thought of as child/relationship-type/parent.
--- the subject/predicate/object naming is better as we
--- can think of the graph as composed of statements.
---
--- we also treat the relationshiptypes / predicates as
--- controlled terms in themselves; this is quite useful
--- as a lot of systems (eg GO) will soon require
--- ontologies of relationship types (eg subtle differences
--- in the partOf relationship)
---
--- this table probably won''t be filled for a while, the core
--- will just treat ontologies as flat lists of terms
-
-CREATE TABLE term_relationship (
-        term_relationship_id INT(10) UNSIGNED NOT NULL auto_increment,
-       	subject_term_id	INT(10) UNSIGNED NOT NULL,
-       	predicate_term_id    INT(10) UNSIGNED NOT NULL,
-       	object_term_id       INT(10) UNSIGNED NOT NULL,
-	ontology_id	INT(10) UNSIGNED NOT NULL,
-	PRIMARY KEY (term_relationship_id),
-	UNIQUE (subject_term_id,predicate_term_id,object_term_id,ontology_id)
-) ENGINE=INNODB;
-
-CREATE INDEX trmrel_predicateid ON term_relationship(predicate_term_id);
-CREATE INDEX trmrel_objectid ON term_relationship(object_term_id);
-CREATE INDEX trmrel_ontid ON term_relationship(ontology_id);
--- CONFIG: you may want to add this for mysql because MySQL often is broken
--- with respect to using the composite index for the initial keys
--- CREATE INDEX ontrel_subjectid ON term_relationship(subject_term_id);
-
--- This lets one associate a single term with a term_relationship 
--- effecively allowing us to treat triples as 1st class terms.
--- 
--- At this point this table is only supported in Biojava. If you want
--- to know more about the rationale and idea behind it, read the
--- following article that Mat Pocock posted to the mailing list:
--- http://www.open-bio.org/pipermail/biosql-l/2003-October/000455.html
-CREATE TABLE term_relationship_term (
-        term_relationship_id INT(10) UNSIGNED NOT NULL,
-        term_id              INT(10) UNSIGNED NOT NULL,
-        PRIMARY KEY ( term_relationship_id ),
-        UNIQUE ( term_id ) 
-) ENGINE=INNODB;
-
--- the infamous transitive closure table on ontology term relationships
--- this is a warehouse approach - you will need to update this regularly
---
--- the triple of (subject, predicate, object) is the same as for ontology
--- relationships, with the exception of predicate being the greatest common
--- denominator of the relationships types visited in the path (i.e., if
--- relationship type A is-a relationship type B, the greatest common
--- denominator for path containing both types A and B is B)
---
--- See the GO database or Chado schema for other (and possibly better
--- documented) implementations of the transitive closure table approach.
-CREATE TABLE term_path (
-        term_path_id         INT(10) UNSIGNED NOT NULL auto_increment,
-       	subject_term_id	     INT(10) UNSIGNED NOT NULL,
-       	predicate_term_id    INT(10) UNSIGNED NOT NULL,
-       	object_term_id       INT(10) UNSIGNED NOT NULL,
-	ontology_id          INT(10) UNSIGNED NOT NULL,
-	distance	     INT(10) UNSIGNED,
-	PRIMARY KEY (term_path_id),
-	UNIQUE (subject_term_id,predicate_term_id,object_term_id,ontology_id,distance)
-) ENGINE=INNODB;
-
-CREATE INDEX trmpath_predicateid ON term_path(predicate_term_id);
-CREATE INDEX trmpath_objectid ON term_path(object_term_id);
-CREATE INDEX trmpath_ontid ON term_path(ontology_id);
--- CONFIG: you may want to add this for mysql because MySQL often is broken
--- with respect to using the composite index for the initial keys
--- CREATE INDEX trmpath_subjectid ON term_path(subject_term_id);
-
--- we can be a bioentry without a biosequence, but not visa-versa
--- most things are going to be keyed off bioentry_id
---
--- accession is the stable id, display_id is a potentially volatile,
--- human readable name.
---
--- Version may be unknown, may be undefined, or may not exist for a certain
--- accession or database (namespace). We require it here to avoid RDBMS-
--- dependend enforcement variants (version is in a compound alternative key),
--- and to simplify query construction for UK look-ups. If there is no version
--- the convention is to put 0 (zero) here. Likewise, a record with a version
--- of zero means the version is to be interpreted as NULL.
---
--- not all entries have a taxon, but many do.
--- one bioentry only has one taxon! (weirdo chimerias are not handled. tough)
---
--- Name maps to display_id in bioperl. We have a different column name
--- here to avoid confusion with the naming convention for foreign keys.
-
-CREATE TABLE bioentry (
-	bioentry_id	    INT(10) UNSIGNED NOT NULL auto_increment,
-  	biodatabase_id  INT(10) UNSIGNED NOT NULL,
-  	taxon_id     	INT(10) UNSIGNED,
-  	name		VARCHAR(40) NOT NULL,
-  	accession    	VARCHAR(128) BINARY NOT NULL,
-  	identifier   	VARCHAR(40) BINARY,
-	division	VARCHAR(6),
-  	description  	TEXT,
-  	version 	SMALLINT UNSIGNED NOT NULL, 
-	PRIMARY KEY (bioentry_id),
-  	UNIQUE (accession,biodatabase_id,version),
--- CONFIG: uncomment one (and only one) of the two lines below. The
--- first puts a uniqueness constraint on the identifier column alone;
--- the other one puts a uniqueness constraint on identifier only
--- within a namespace.
---  	UNIQUE (identifier)
- 	UNIQUE (identifier, biodatabase_id)
-) ENGINE=INNODB;
-
-CREATE INDEX bioentry_name ON bioentry(name);
-CREATE INDEX bioentry_db   ON bioentry(biodatabase_id);
-CREATE INDEX bioentry_tax  ON bioentry(taxon_id);
-
---
--- bioentry-bioentry relationships: these are typed
---
-CREATE TABLE bioentry_relationship (
-        bioentry_relationship_id INT(10) UNSIGNED NOT NULL auto_increment,
-        object_bioentry_id 	 INT(10) UNSIGNED NOT NULL,
-   	subject_bioentry_id 	 INT(10) UNSIGNED NOT NULL,
-   	term_id 		 INT(10) UNSIGNED NOT NULL,
-   	rank 			 INT(5),
-   	PRIMARY KEY (bioentry_relationship_id),
-	UNIQUE (object_bioentry_id,subject_bioentry_id,term_id)
-) ENGINE=INNODB;
-
-CREATE INDEX bioentryrel_trm   ON bioentry_relationship(term_id);
-CREATE INDEX bioentryrel_child ON bioentry_relationship(subject_bioentry_id);
--- CONFIG: you may want to add this for mysql because MySQL often is broken
--- with respect to using the composite index for the initial keys
--- CREATE INDEX bioentryrel_parent ON bioentry_relationship(object_bioentry_id);
-
--- for deep (depth > 1) bioentry relationship trees we need a transitive
--- closure table too
-CREATE TABLE bioentry_path (
-   	object_bioentry_id 	INT(10) UNSIGNED NOT NULL,
-   	subject_bioentry_id 	INT(10) UNSIGNED NOT NULL,
-   	term_id 		INT(10) UNSIGNED NOT NULL,
-	distance	     	INT(10) UNSIGNED,
-	UNIQUE (object_bioentry_id,subject_bioentry_id,term_id,distance)
-) ENGINE=INNODB;
-
-CREATE INDEX bioentrypath_trm   ON bioentry_path(term_id);
-CREATE INDEX bioentrypath_child ON bioentry_path(subject_bioentry_id);
--- CONFIG: you may want to add this for mysql because MySQL often is broken
--- with respect to using the composite index for the initial keys
--- CREATE INDEX bioentrypath_parent ON bioentry_path(object_bioentry_id);
-
--- some bioentries will have a sequence
--- biosequence because sequence is sometimes a reserved word
-
-CREATE TABLE biosequence (
-  	bioentry_id     INT(10) UNSIGNED NOT NULL,
-  	version     	SMALLINT, 
-  	length      	INT(10),
-  	alphabet        VARCHAR(10),
-  	seq 		LONGTEXT,
-	PRIMARY KEY (bioentry_id)
-) ENGINE=INNODB;
-
--- CONFIG: add these only if you want them:
--- ALTER TABLE biosequence ADD COLUMN ( isoelec_pt NUMERIC(4,2) );
--- ALTER TABLE biosequence ADD COLUMN (	mol_wgt DOUBLE PRECISION );
--- ALTER TABLE biosequence ADD COLUMN ( perc_gc DOUBLE PRECISION );
-
--- database cross-references (e.g., GenBank:AC123456.1)
---
--- Version may be unknown, may be undefined, or may not exist for a certain
--- accession or database (namespace). We require it here to avoid RDBMS-
--- dependend enforcement variants (version is in a compound alternative key),
--- and to simplify query construction for UK look-ups. If there is no version
--- the convention is to put 0 (zero) here. Likewise, a record with a version
--- of zero means the version is to be interpreted as NULL.
---
-CREATE TABLE dbxref (
-        dbxref_id	INT(10) UNSIGNED NOT NULL auto_increment,
-        dbname          VARCHAR(40) BINARY NOT NULL,
-        accession       VARCHAR(128) BINARY NOT NULL,
-	version		SMALLINT UNSIGNED NOT NULL,
-	PRIMARY KEY (dbxref_id),
-        UNIQUE(accession, dbname, version)
-) ENGINE=INNODB;
-
-CREATE INDEX dbxref_db  ON dbxref(dbname);
-
--- for roundtripping embl/genbank, we need to have the "optional ID"
--- for the dbxref.
---
--- another use of this table could be for storing
--- descriptive text for a dbxref. for example, we may want to
--- know stuff about the interpro accessions we store (without
--- importing all of interpro), so we can attach the text
--- description as a synonym
-CREATE TABLE dbxref_qualifier_value (
-       	dbxref_id 		INT(10) UNSIGNED NOT NULL,
-       	term_id 		INT(10) UNSIGNED NOT NULL,
-  	rank  		   	SMALLINT NOT NULL DEFAULT 0,
-       	value			TEXT,
-	PRIMARY KEY (dbxref_id,term_id,rank)
-) ENGINE=INNODB;
-
-CREATE INDEX dbxrefqual_dbx ON dbxref_qualifier_value(dbxref_id);
-CREATE INDEX dbxrefqual_trm ON dbxref_qualifier_value(term_id);
-
--- Direct dblinks. It is tempting to do this
--- from bioentry_id to bioentry_id. But that wont work
--- during updates of one database - we will have to edit
--- this table each time. Better to do the join through accession
--- and db each time. Should be almost as cheap
-
-CREATE TABLE bioentry_dbxref ( 
-       	bioentry_id        INT(10) UNSIGNED NOT NULL,
-       	dbxref_id          INT(10) UNSIGNED NOT NULL,
-  	rank  		   SMALLINT,
-	PRIMARY KEY (bioentry_id,dbxref_id)
-) ENGINE=INNODB;
-
-CREATE INDEX dblink_dbx  ON bioentry_dbxref(dbxref_id);
-
--- We can have multiple references per bioentry, but one reference
--- can also be used for the same bioentry.
---
--- No two references can reference the same reference database entry
--- (dbxref_id). This is where the MEDLINE id goes: PUBMED:123456.
-
-CREATE TABLE reference (
-  	reference_id       INT(10) UNSIGNED NOT NULL auto_increment,
-	dbxref_id	   INT(10) UNSIGNED,
-  	location 	   TEXT NOT NULL,
-  	title    	   TEXT,
-  	authors  	   TEXT,
-  	crc	   	   VARCHAR(32),
-	PRIMARY KEY (reference_id),
-	UNIQUE (dbxref_id),
-	UNIQUE (crc)
-) ENGINE=INNODB;
-
--- bioentry to reference associations
-CREATE TABLE bioentry_reference (
-  	bioentry_id 	INT(10) UNSIGNED NOT NULL,
-  	reference_id 	INT(10) UNSIGNED NOT NULL,
-  	start_pos	INT(10),
-  	end_pos	  	INT(10),
-  	rank  		SMALLINT NOT NULL DEFAULT 0,
-  	PRIMARY KEY(bioentry_id,reference_id,rank)
-) ENGINE=INNODB;
-
-CREATE INDEX bioentryref_ref ON bioentry_reference(reference_id);
-
-
--- We can have multiple comments per seqentry, and
--- comments can have embedded '\n' characters
-
-CREATE TABLE comment (
-  	comment_id  	INT(10) UNSIGNED NOT NULL auto_increment,
-  	bioentry_id    	INT(10) UNSIGNED NOT NULL,
-  	comment_text   	TEXT NOT NULL,
-  	rank   		SMALLINT NOT NULL DEFAULT 0,
-	PRIMARY KEY (comment_id),
-  	UNIQUE(bioentry_id, rank)
-) ENGINE=INNODB;
-
-
--- tag/value and ontology term annotation for bioentries goes here
-CREATE TABLE bioentry_qualifier_value (
-	bioentry_id   		INT(10) UNSIGNED NOT NULL,
-   	term_id  		INT(10) UNSIGNED NOT NULL,
-   	value         		TEXT,
-	rank			INT(5) NOT NULL DEFAULT 0,
-	UNIQUE (bioentry_id,term_id,rank)
-) ENGINE=INNODB;
-
-CREATE INDEX bioentryqual_trm ON bioentry_qualifier_value(term_id);
-
--- feature table. We cleanly handle
---   - simple locations
---   - split locations
---   - split locations on remote sequences
-
-CREATE TABLE seqfeature (
-   	seqfeature_id 		INT(10) UNSIGNED NOT NULL auto_increment,
-   	bioentry_id   		INT(10) UNSIGNED NOT NULL,
-   	type_term_id		INT(10) UNSIGNED NOT NULL,
-   	source_term_id  	INT(10) UNSIGNED NOT NULL,
-	display_name		VARCHAR(64),
-   	rank 			SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-	PRIMARY KEY (seqfeature_id),
-	UNIQUE (bioentry_id,type_term_id,source_term_id,rank)
-) ENGINE=INNODB;
-
-CREATE INDEX seqfeature_trm  ON seqfeature(type_term_id);
-CREATE INDEX seqfeature_fsrc ON seqfeature(source_term_id);
--- you may want to add this for mysql because MySQL often is broken with
--- respect to using the composite index for the initial keys
--- CREATE INDEX seqfeature_bioentryid ON seqfeature(bioentry_id);
-
--- seqfeatures can be arranged in containment hierarchies.
--- one can imagine storing other relationships between features,
--- in this case the term_id can be used to type the relationship
-
-CREATE TABLE seqfeature_relationship (
-        seqfeature_relationship_id INT(10) UNSIGNED NOT NULL auto_increment,
-   	object_seqfeature_id	INT(10) UNSIGNED NOT NULL,
-   	subject_seqfeature_id 	INT(10) UNSIGNED NOT NULL,
-   	term_id 	        INT(10) UNSIGNED NOT NULL,
-   	rank 			INT(5),
-   	PRIMARY KEY (seqfeature_relationship_id),
-	UNIQUE (object_seqfeature_id,subject_seqfeature_id,term_id)
-) ENGINE=INNODB;
-
-CREATE INDEX seqfeaturerel_trm   ON seqfeature_relationship(term_id);
-CREATE INDEX seqfeaturerel_child ON seqfeature_relationship(subject_seqfeature_id);
--- CONFIG: you may want to add this for mysql because MySQL often is broken
--- with respect to using the composite index for the initial keys
--- CREATE INDEX seqfeaturerel_parent ON seqfeature_relationship(object_seqfeature_id);
-
--- for deep (depth > 1) seqfeature relationship trees we need a transitive
--- closure table too
-CREATE TABLE seqfeature_path (
-   	object_seqfeature_id	INT(10) UNSIGNED NOT NULL,
-   	subject_seqfeature_id 	INT(10) UNSIGNED NOT NULL,
-   	term_id 		INT(10) UNSIGNED NOT NULL,
-	distance	     	INT(10) UNSIGNED,
-	UNIQUE (object_seqfeature_id,subject_seqfeature_id,term_id,distance)
-) ENGINE=INNODB;
-
-CREATE INDEX seqfeaturepath_trm   ON seqfeature_path(term_id);
-CREATE INDEX seqfeaturepath_child ON seqfeature_path(subject_seqfeature_id);
--- CONFIG: you may want to add this for mysql because MySQL often is broken
--- with respect to using the composite index for the initial keys
--- CREATE INDEX seqfeaturerel_parent ON seqfeature_path(object_seqfeature_id);
-
--- tag/value associations - or ontology annotations
-CREATE TABLE seqfeature_qualifier_value (
-	seqfeature_id 		INT(10) UNSIGNED NOT NULL,
-   	term_id 		INT(10) UNSIGNED NOT NULL,
-   	rank 			SMALLINT NOT NULL DEFAULT 0,
-   	value  			TEXT NOT NULL,
-   	PRIMARY KEY (seqfeature_id,term_id,rank)
-) ENGINE=INNODB;
-
-CREATE INDEX seqfeaturequal_trm ON seqfeature_qualifier_value(term_id);
-   
--- DBXrefs for features. This is necessary for genome oriented viewpoints,
--- where you have a few have long sequences (contigs, or chromosomes) with many
--- features on them. In that case the features are the semantic scope for
--- their annotation bundles, not the bioentry they are attached to.
-
-CREATE TABLE seqfeature_dbxref ( 
-       	seqfeature_id      INT(10) UNSIGNED NOT NULL,
-       	dbxref_id          INT(10) UNSIGNED NOT NULL,
-  	rank  		   SMALLINT,
-	PRIMARY KEY (seqfeature_id,dbxref_id)
-) ENGINE=INNODB;
-
-CREATE INDEX feadblink_dbx  ON seqfeature_dbxref(dbxref_id);
-
--- basically we model everything as potentially having
--- any number of locations, ie, a split location. SimpleLocations
--- just have one location. We need to have a location id for the qualifier
--- associations of fuzzy locations.
-
--- please do not try to model complex assemblies with this thing. It wont
--- work. Check out the ensembl schema for this.
-
--- we allow nulls for start/end - this is useful for fuzzies as
--- standard range queries will not be included
-
--- for remote locations, the join to make is to DBXref
--- the FK to term is a possibility to store the type of the
--- location for determining in one hit whether it's a fuzzy or not
-
-CREATE TABLE location (
-	location_id		INT(10) UNSIGNED NOT NULL auto_increment,
-   	seqfeature_id		INT(10) UNSIGNED NOT NULL,
-	dbxref_id		INT(10) UNSIGNED,
-	term_id			INT(10) UNSIGNED,
-   	start_pos              	INT(10),
-   	end_pos                	INT(10),
-   	strand             	TINYINT NOT NULL DEFAULT 0,
-   	rank          		SMALLINT NOT NULL DEFAULT 0,
-	PRIMARY KEY (location_id),
-   	UNIQUE (seqfeature_id, rank)
-) ENGINE=INNODB;
-
-CREATE INDEX seqfeatureloc_start ON location(start_pos, end_pos);
-CREATE INDEX seqfeatureloc_dbx   ON location(dbxref_id);
-CREATE INDEX seqfeatureloc_trm   ON location(term_id);
-
--- location qualifiers - mainly intended for fuzzies but anything
--- can go in here
--- some controlled vocab terms have slots;
--- fuzzies could be modeled as min_start(5), max_start(5)
--- 
--- there is no restriction on extending the fuzzy ontology
--- for your own nefarious aims, although the bio* apis will
--- most likely ignore these
-CREATE TABLE location_qualifier_value (
-	location_id		INT(10) UNSIGNED NOT NULL,
-   	term_id 		INT(10) UNSIGNED NOT NULL,
-   	value  			VARCHAR(255) NOT NULL,
-   	int_value 		INT(10),
-	PRIMARY KEY (location_id,term_id)
-) ENGINE=INNODB;
-
-CREATE INDEX locationqual_trm ON location_qualifier_value(term_id);
-
---
--- Create the foreign key constraints
---
-
--- ontology term
-
-ALTER TABLE term ADD CONSTRAINT FKont_term
-	FOREIGN KEY (ontology_id) REFERENCES ontology(ontology_id)
-	ON DELETE CASCADE;
-
--- term synonyms
-
-ALTER TABLE term_synonym ADD CONSTRAINT FKterm_syn
-	FOREIGN KEY (term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-
--- term_dbxref
-
-ALTER TABLE term_dbxref ADD CONSTRAINT FKdbxref_trmdbxref
-       	FOREIGN KEY (dbxref_id) REFERENCES dbxref(dbxref_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_dbxref ADD CONSTRAINT FKterm_trmdbxref
-      FOREIGN KEY (term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-
--- term_relationship
-
-ALTER TABLE term_relationship ADD CONSTRAINT FKtrmsubject_trmrel
-	FOREIGN KEY (subject_term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_relationship ADD CONSTRAINT FKtrmpredicate_trmrel
-       	FOREIGN KEY (predicate_term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_relationship ADD CONSTRAINT FKtrmobject_trmrel
-       	FOREIGN KEY (object_term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_relationship ADD CONSTRAINT FKterm_trmrel
-       	FOREIGN KEY (ontology_id) REFERENCES ontology(ontology_id)
-	ON DELETE CASCADE;
-
--- term_relationship_term
-
-ALTER TABLE term_relationship_term ADD CONSTRAINT FKtrmrel_trmreltrm
-	FOREIGN KEY (term_relationship_id) REFERENCES term_relationship(term_relationship_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_relationship_term ADD CONSTRAINT FKtrm_trmreltrm
-	FOREIGN KEY (term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-
--- term_path
-
-ALTER TABLE term_path ADD CONSTRAINT FKtrmsubject_trmpath
-	FOREIGN KEY (subject_term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_path ADD CONSTRAINT FKtrmpredicate_trmpath
-       	FOREIGN KEY (predicate_term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_path ADD CONSTRAINT FKtrmobject_trmpath
-       	FOREIGN KEY (object_term_id) REFERENCES term(term_id)
-	ON DELETE CASCADE;
-ALTER TABLE term_path ADD CONSTRAINT FKontology_trmpath
-       	FOREIGN KEY (ontology_id) REFERENCES ontology(ontology_id)
-	ON DELETE CASCADE;
-
--- taxon, taxon_name
-
--- unfortunately, we can't constrain parent_taxon_id as it is violated
--- occasionally by the downloads available from NCBI
--- ALTER TABLE taxon ADD CONSTRAINT FKtaxon_taxon
---        FOREIGN KEY (parent_taxon_id) REFERENCES taxon(taxon_id);
-ALTER TABLE taxon_name ADD CONSTRAINT FKtaxon_taxonname
-        FOREIGN KEY (taxon_id) REFERENCES taxon(taxon_id)
-        ON DELETE CASCADE;
-
--- bioentry
-
-ALTER TABLE bioentry ADD CONSTRAINT FKtaxon_bioentry
-	FOREIGN KEY (taxon_id) REFERENCES taxon(taxon_id);
-ALTER TABLE bioentry ADD CONSTRAINT FKbiodatabase_bioentry
-	FOREIGN KEY (biodatabase_id) REFERENCES biodatabase(biodatabase_id);
-
--- bioentry_relationship
-
-ALTER TABLE bioentry_relationship ADD CONSTRAINT FKterm_bioentryrel
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-ALTER TABLE bioentry_relationship ADD CONSTRAINT FKparentent_bioentryrel
-	FOREIGN KEY (object_bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-ALTER TABLE bioentry_relationship ADD CONSTRAINT FKchildent_bioentryrel
-	FOREIGN KEY (subject_bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-
--- bioentry_path
-
-ALTER TABLE bioentry_path ADD CONSTRAINT FKterm_bioentrypath
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-ALTER TABLE bioentry_path ADD CONSTRAINT FKparentent_bioentrypath
-	FOREIGN KEY (object_bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-ALTER TABLE bioentry_path ADD CONSTRAINT FKchildent_bioentrypath
-	FOREIGN KEY (subject_bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-
--- biosequence
-
-ALTER TABLE biosequence ADD CONSTRAINT FKbioentry_bioseq
-	FOREIGN KEY (bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-
--- comment
-
-ALTER TABLE comment ADD CONSTRAINT FKbioentry_comment
-	FOREIGN KEY(bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-
--- bioentry_dbxref
-
-ALTER TABLE bioentry_dbxref ADD CONSTRAINT FKbioentry_dblink
-        FOREIGN KEY (bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-ALTER TABLE bioentry_dbxref ADD CONSTRAINT FKdbxref_dblink
-       	FOREIGN KEY (dbxref_id) REFERENCES dbxref(dbxref_id)
-	ON DELETE CASCADE;
-
--- dbxref_qualifier_value
-
-ALTER TABLE dbxref_qualifier_value ADD CONSTRAINT FKtrm_dbxrefqual
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-ALTER TABLE dbxref_qualifier_value ADD CONSTRAINT FKdbxref_dbxrefqual
-	FOREIGN KEY (dbxref_id) REFERENCES dbxref(dbxref_id)
-	ON DELETE CASCADE;
-
--- bioentry_reference
-
-ALTER TABLE bioentry_reference ADD CONSTRAINT FKbioentry_entryref
-	FOREIGN KEY (bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-ALTER TABLE bioentry_reference ADD CONSTRAINT FKreference_entryref
-	FOREIGN KEY (reference_id) REFERENCES reference(reference_id)
-	ON DELETE CASCADE;
-
--- bioentry_qualifier_value
-
-ALTER TABLE bioentry_qualifier_value ADD CONSTRAINT FKbioentry_entqual
-	FOREIGN KEY (bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-ALTER TABLE bioentry_qualifier_value ADD CONSTRAINT FKterm_entqual
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-
--- reference 
-ALTER TABLE reference ADD CONSTRAINT FKdbxref_reference
-      FOREIGN KEY ( dbxref_id ) REFERENCES dbxref ( dbxref_id ) ;
-
--- seqfeature
-
-ALTER TABLE seqfeature ADD CONSTRAINT FKterm_seqfeature
-	FOREIGN KEY (type_term_id) REFERENCES term(term_id);
-ALTER TABLE seqfeature ADD CONSTRAINT FKsourceterm_seqfeature
-	FOREIGN KEY (source_term_id) REFERENCES term(term_id);
-ALTER TABLE seqfeature ADD CONSTRAINT FKbioentry_seqfeature
-	FOREIGN KEY (bioentry_id) REFERENCES bioentry(bioentry_id)
-	ON DELETE CASCADE;
-
--- seqfeature_relationship
-
-ALTER TABLE seqfeature_relationship ADD CONSTRAINT FKterm_seqfeatrel
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-ALTER TABLE seqfeature_relationship ADD CONSTRAINT FKparentfeat_seqfeatrel
-	FOREIGN KEY (object_seqfeature_id) REFERENCES seqfeature(seqfeature_id)
-	ON DELETE CASCADE;
-ALTER TABLE seqfeature_relationship ADD CONSTRAINT FKchildfeat_seqfeatrel
-	FOREIGN KEY (subject_seqfeature_id) REFERENCES seqfeature(seqfeature_id)
-	ON DELETE CASCADE;
-
--- seqfeature_path
-
-ALTER TABLE seqfeature_path ADD CONSTRAINT FKterm_seqfeatpath
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-ALTER TABLE seqfeature_path ADD CONSTRAINT FKparentfeat_seqfeatpath
-	FOREIGN KEY (object_seqfeature_id) REFERENCES seqfeature(seqfeature_id)
-	ON DELETE CASCADE;
-ALTER TABLE seqfeature_path ADD CONSTRAINT FKchildfeat_seqfeatpath
-	FOREIGN KEY (subject_seqfeature_id) REFERENCES seqfeature(seqfeature_id)
-	ON DELETE CASCADE;
-
--- seqfeature_qualifier_value
-ALTER TABLE seqfeature_qualifier_value ADD CONSTRAINT FKterm_featqual
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-ALTER TABLE seqfeature_qualifier_value ADD CONSTRAINT FKseqfeature_featqual
-	FOREIGN KEY (seqfeature_id) REFERENCES seqfeature(seqfeature_id)
-	ON DELETE CASCADE;
-
--- seqfeature_dbxref
-
-ALTER TABLE seqfeature_dbxref ADD CONSTRAINT FKseqfeature_feadblink
-        FOREIGN KEY (seqfeature_id) REFERENCES seqfeature(seqfeature_id)
-	ON DELETE CASCADE;
-ALTER TABLE seqfeature_dbxref ADD CONSTRAINT FKdbxref_feadblink
-       	FOREIGN KEY (dbxref_id) REFERENCES dbxref(dbxref_id)
-	ON DELETE CASCADE;
-
--- location
-
-ALTER TABLE location ADD CONSTRAINT FKseqfeature_location
-	FOREIGN KEY (seqfeature_id) REFERENCES seqfeature(seqfeature_id)
-	ON DELETE CASCADE;
-ALTER TABLE location ADD CONSTRAINT FKdbxref_location
-	FOREIGN KEY (dbxref_id) REFERENCES dbxref(dbxref_id);
-ALTER TABLE location ADD CONSTRAINT FKterm_featloc
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-
--- location_qualifier_value
-
-ALTER TABLE location_qualifier_value ADD CONSTRAINT FKfeatloc_locqual
-	FOREIGN KEY (location_id) REFERENCES location(location_id)
-	ON DELETE CASCADE;
-ALTER TABLE location_qualifier_value ADD CONSTRAINT FKterm_locqual
-	FOREIGN KEY (term_id) REFERENCES term(term_id);
-
+-- join to bioentry table for tracking with versions of entries
+
+create table if not exists biodatabase
+(
+  biodatabase_id int unsigned auto_increment
+    primary key,
+  name           varchar(128) not null,
+  authority      varchar(128) null,
+  description    text         null,
+  constraint name
+  unique (name)
+)
+  charset = latin1;
+
+create index db_auth
+  on biodatabase (authority);
+
+create table if not exists dbxref
+(
+  dbxref_id int unsigned auto_increment
+    primary key,
+  dbname    varchar(40)          not null,
+  accession varchar(128)         not null,
+  version   smallint(5) unsigned not null,
+  constraint accession
+  unique (accession, dbname, version)
+)
+  charset = latin1;
+
+create index dbxref_db
+  on dbxref (dbname);
+
+create table if not exists ontology
+(
+  ontology_id int unsigned auto_increment
+    primary key,
+  name        varchar(32) not null,
+  definition  text        null,
+  constraint name
+  unique (name)
+)
+  charset = latin1;
+
+create table if not exists reference
+(
+  reference_id int unsigned auto_increment
+    primary key,
+  dbxref_id    int unsigned null,
+  location     text         not null,
+  title        text         null,
+  authors      text         null,
+  crc          varchar(32)  null,
+  constraint crc
+  unique (crc),
+  constraint dbxref_id
+  unique (dbxref_id),
+  constraint FKdbxref_reference
+  foreign key (dbxref_id) references dbxref (dbxref_id)
+)
+  charset = latin1;
+
+create table if not exists taxon
+(
+  taxon_id          int unsigned auto_increment
+    primary key,
+  ncbi_taxon_id     int(10)          null,
+  parent_taxon_id   int unsigned     null,
+  node_rank         varchar(32)      null,
+  genetic_code      tinyint unsigned null,
+  mito_genetic_code tinyint unsigned null,
+  left_value        int unsigned     null,
+  right_value       int unsigned     null,
+  constraint left_value
+  unique (left_value),
+  constraint ncbi_taxon_id
+  unique (ncbi_taxon_id),
+  constraint right_value
+  unique (right_value)
+)
+  charset = latin1;
+
+create table if not exists bioentry
+(
+  bioentry_id    int unsigned auto_increment
+    primary key,
+  biodatabase_id int unsigned         not null,
+  taxon_id       int unsigned         null,
+  name           varchar(40)          not null,
+  accession      varchar(128)         not null,
+  identifier     varchar(40)          null,
+  division       varchar(6)           null,
+  description    text                 null,
+  version        smallint(5) unsigned not null,
+  constraint accession
+  unique (accession, biodatabase_id, version),
+  constraint identifier
+  unique (identifier, biodatabase_id),
+  constraint FKbiodatabase_bioentry
+  foreign key (biodatabase_id) references biodatabase (biodatabase_id),
+  constraint FKtaxon_bioentry
+  foreign key (taxon_id) references taxon (taxon_id)
+)
+  charset = latin1;
+
+create index bioentry_db
+  on bioentry (biodatabase_id);
+
+create index bioentry_name
+  on bioentry (name);
+
+create index bioentry_tax
+  on bioentry (taxon_id);
+
+create table if not exists bioentry_dbxref
+(
+  bioentry_id int unsigned not null,
+  dbxref_id   int unsigned not null,
+  rank        smallint(6)  null,
+  primary key (bioentry_id, dbxref_id),
+  constraint FKbioentry_dblink
+  foreign key (bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKdbxref_dblink
+  foreign key (dbxref_id) references dbxref (dbxref_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index dblink_dbx
+  on bioentry_dbxref (dbxref_id);
+
+create table if not exists bioentry_reference
+(
+  bioentry_id  int unsigned            not null,
+  reference_id int unsigned            not null,
+  start_pos    int(10)                 null,
+  end_pos      int(10)                 null,
+  rank         smallint(6) default '0' not null,
+  primary key (bioentry_id, reference_id, rank),
+  constraint FKbioentry_entryref
+  foreign key (bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKreference_entryref
+  foreign key (reference_id) references reference (reference_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index bioentryref_ref
+  on bioentry_reference (reference_id);
+
+create table if not exists biosequence
+(
+  bioentry_id int unsigned not null
+    primary key,
+  version     smallint(6)  null,
+  length      int(10)      null,
+  alphabet    varchar(10)  null,
+  seq         longtext     null,
+  constraint FKbioentry_bioseq
+  foreign key (bioentry_id) references bioentry (bioentry_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create table if not exists comment
+(
+  comment_id   int unsigned auto_increment
+    primary key,
+  bioentry_id  int unsigned            not null,
+  comment_text text                    not null,
+  rank         smallint(6) default '0' not null,
+  constraint bioentry_id
+  unique (bioentry_id, rank),
+  constraint FKbioentry_comment
+  foreign key (bioentry_id) references bioentry (bioentry_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index taxparent
+  on taxon (parent_taxon_id);
+
+create table if not exists taxon_name
+(
+  taxon_id   int unsigned not null,
+  name       varchar(255) not null,
+  name_class varchar(32)  not null,
+  constraint taxon_id
+  unique (taxon_id, name, name_class),
+  constraint FKtaxon_taxonname
+  foreign key (taxon_id) references taxon (taxon_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index taxnamename
+  on taxon_name (name);
+
+create index taxnametaxonid
+  on taxon_name (taxon_id);
+
+create table if not exists term
+(
+  term_id     int unsigned auto_increment
+    primary key,
+  name        varchar(255) not null,
+  definition  text         null,
+  identifier  varchar(40)  null,
+  is_obsolete char         null,
+  ontology_id int unsigned not null,
+  constraint identifier
+  unique (identifier),
+  constraint name
+  unique (name, ontology_id, is_obsolete),
+  constraint FKont_term
+  foreign key (ontology_id) references ontology (ontology_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create table if not exists bioentry_path
+(
+  object_bioentry_id  int unsigned not null,
+  subject_bioentry_id int unsigned not null,
+  term_id             int unsigned not null,
+  distance            int unsigned null,
+  constraint object_bioentry_id
+  unique (object_bioentry_id, subject_bioentry_id, term_id, distance),
+  constraint FKchildent_bioentrypath
+  foreign key (subject_bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKparentent_bioentrypath
+  foreign key (object_bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKterm_bioentrypath
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index bioentrypath_child
+  on bioentry_path (subject_bioentry_id);
+
+create index bioentrypath_trm
+  on bioentry_path (term_id);
+
+create table if not exists bioentry_qualifier_value
+(
+  bioentry_id int unsigned       not null,
+  term_id     int unsigned       not null,
+  value       text               null,
+  rank        int(5) default '0' not null,
+  constraint bioentry_id
+  unique (bioentry_id, term_id, rank),
+  constraint FKbioentry_entqual
+  foreign key (bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKterm_entqual
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index bioentryqual_trm
+  on bioentry_qualifier_value (term_id);
+
+create table if not exists bioentry_relationship
+(
+  bioentry_relationship_id int unsigned auto_increment
+    primary key,
+  object_bioentry_id       int unsigned not null,
+  subject_bioentry_id      int unsigned not null,
+  term_id                  int unsigned not null,
+  rank                     int(5)       null,
+  constraint object_bioentry_id
+  unique (object_bioentry_id, subject_bioentry_id, term_id),
+  constraint FKchildent_bioentryrel
+  foreign key (subject_bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKparentent_bioentryrel
+  foreign key (object_bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKterm_bioentryrel
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index bioentryrel_child
+  on bioentry_relationship (subject_bioentry_id);
+
+create index bioentryrel_trm
+  on bioentry_relationship (term_id);
+
+create table if not exists dbxref_qualifier_value
+(
+  dbxref_id int unsigned            not null,
+  term_id   int unsigned            not null,
+  rank      smallint(6) default '0' not null,
+  value     text                    null,
+  primary key (dbxref_id, term_id, rank),
+  constraint FKdbxref_dbxrefqual
+  foreign key (dbxref_id) references dbxref (dbxref_id)
+    on delete cascade,
+  constraint FKtrm_dbxrefqual
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index dbxrefqual_dbx
+  on dbxref_qualifier_value (dbxref_id);
+
+create index dbxrefqual_trm
+  on dbxref_qualifier_value (term_id);
+
+create table if not exists seqfeature
+(
+  seqfeature_id  int unsigned auto_increment
+    primary key,
+  bioentry_id    int unsigned                     not null,
+  ENGINE_term_id int unsigned                     not null,
+  source_term_id int unsigned                     not null,
+  display_name   varchar(64)                      null,
+  rank           smallint(5) unsigned default '0' not null,
+  constraint bioentry_id
+  unique (bioentry_id, ENGINE_term_id, source_term_id, rank),
+  constraint FKbioentry_seqfeature
+  foreign key (bioentry_id) references bioentry (bioentry_id)
+    on delete cascade,
+  constraint FKsourceterm_seqfeature
+  foreign key (source_term_id) references term (term_id),
+  constraint FKterm_seqfeature
+  foreign key (ENGINE_term_id) references term (term_id)
+)
+  charset = latin1;
+
+create table if not exists location
+(
+  location_id   int unsigned auto_increment
+    primary key,
+  seqfeature_id int unsigned            not null,
+  dbxref_id     int unsigned            null,
+  term_id       int unsigned            null,
+  start_pos     int(10)                 null,
+  end_pos       int(10)                 null,
+  strand        tinyint default '0'     not null,
+  rank          smallint(6) default '0' not null,
+  constraint seqfeature_id
+  unique (seqfeature_id, rank),
+  constraint FKdbxref_location
+  foreign key (dbxref_id) references dbxref (dbxref_id),
+  constraint FKseqfeature_location
+  foreign key (seqfeature_id) references seqfeature (seqfeature_id)
+    on delete cascade,
+  constraint FKterm_featloc
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index seqfeatureloc_dbx
+  on location (dbxref_id);
+
+create index seqfeatureloc_start
+  on location (start_pos, end_pos);
+
+create index seqfeatureloc_trm
+  on location (term_id);
+
+create table if not exists location_qualifier_value
+(
+  location_id int unsigned not null,
+  term_id     int unsigned not null,
+  value       varchar(255) not null,
+  int_value   int(10)      null,
+  primary key (location_id, term_id),
+  constraint FKfeatloc_locqual
+  foreign key (location_id) references location (location_id)
+    on delete cascade,
+  constraint FKterm_locqual
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index locationqual_trm
+  on location_qualifier_value (term_id);
+
+create index seqfeature_fsrc
+  on seqfeature (source_term_id);
+
+create index seqfeature_trm
+  on seqfeature (ENGINE_term_id);
+
+create table if not exists seqfeature_dbxref
+(
+  seqfeature_id int unsigned not null,
+  dbxref_id     int unsigned not null,
+  rank          smallint(6)  null,
+  primary key (seqfeature_id, dbxref_id),
+  constraint FKdbxref_feadblink
+  foreign key (dbxref_id) references dbxref (dbxref_id)
+    on delete cascade,
+  constraint FKseqfeature_feadblink
+  foreign key (seqfeature_id) references seqfeature (seqfeature_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index feadblink_dbx
+  on seqfeature_dbxref (dbxref_id);
+
+create table if not exists seqfeature_path
+(
+  object_seqfeature_id  int unsigned not null,
+  subject_seqfeature_id int unsigned not null,
+  term_id               int unsigned not null,
+  distance              int unsigned null,
+  constraint object_seqfeature_id
+  unique (object_seqfeature_id, subject_seqfeature_id, term_id, distance),
+  constraint FKchildfeat_seqfeatpath
+  foreign key (subject_seqfeature_id) references seqfeature (seqfeature_id)
+    on delete cascade,
+  constraint FKparentfeat_seqfeatpath
+  foreign key (object_seqfeature_id) references seqfeature (seqfeature_id)
+    on delete cascade,
+  constraint FKterm_seqfeatpath
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index seqfeaturepath_child
+  on seqfeature_path (subject_seqfeature_id);
+
+create index seqfeaturepath_trm
+  on seqfeature_path (term_id);
+
+create table if not exists seqfeature_qualifier_value
+(
+  seqfeature_id int unsigned            not null,
+  term_id       int unsigned            not null,
+  rank          smallint(6) default '0' not null,
+  value         text                    not null,
+  primary key (seqfeature_id, term_id, rank),
+  constraint FKseqfeature_featqual
+  foreign key (seqfeature_id) references seqfeature (seqfeature_id)
+    on delete cascade,
+  constraint FKterm_featqual
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index seqfeaturequal_trm
+  on seqfeature_qualifier_value (term_id);
+
+create table if not exists seqfeature_relationship
+(
+  seqfeature_relationship_id int unsigned auto_increment
+    primary key,
+  object_seqfeature_id       int unsigned not null,
+  subject_seqfeature_id      int unsigned not null,
+  term_id                    int unsigned not null,
+  rank                       int(5)       null,
+  constraint object_seqfeature_id
+  unique (object_seqfeature_id, subject_seqfeature_id, term_id),
+  constraint FKchildfeat_seqfeatrel
+  foreign key (subject_seqfeature_id) references seqfeature (seqfeature_id)
+    on delete cascade,
+  constraint FKparentfeat_seqfeatrel
+  foreign key (object_seqfeature_id) references seqfeature (seqfeature_id)
+    on delete cascade,
+  constraint FKterm_seqfeatrel
+  foreign key (term_id) references term (term_id)
+)
+  charset = latin1;
+
+create index seqfeaturerel_child
+  on seqfeature_relationship (subject_seqfeature_id);
+
+create index seqfeaturerel_trm
+  on seqfeature_relationship (term_id);
+
+create index term_ont
+  on term (ontology_id);
+
+create table if not exists term_dbxref
+(
+  term_id   int unsigned not null,
+  dbxref_id int unsigned not null,
+  rank      smallint(6)  null,
+  primary key (term_id, dbxref_id),
+  constraint FKdbxref_trmdbxref
+  foreign key (dbxref_id) references dbxref (dbxref_id)
+    on delete cascade,
+  constraint FKterm_trmdbxref
+  foreign key (term_id) references term (term_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index trmdbxref_dbxrefid
+  on term_dbxref (dbxref_id);
+
+create table if not exists term_path
+(
+  term_path_id      int unsigned auto_increment
+    primary key,
+  subject_term_id   int unsigned not null,
+  predicate_term_id int unsigned not null,
+  object_term_id    int unsigned not null,
+  ontology_id       int unsigned not null,
+  distance          int unsigned null,
+  constraint subject_term_id
+  unique (subject_term_id, predicate_term_id, object_term_id, ontology_id, distance),
+  constraint FKontology_trmpath
+  foreign key (ontology_id) references ontology (ontology_id)
+    on delete cascade,
+  constraint FKtrmobject_trmpath
+  foreign key (object_term_id) references term (term_id)
+    on delete cascade,
+  constraint FKtrmpredicate_trmpath
+  foreign key (predicate_term_id) references term (term_id)
+    on delete cascade,
+  constraint FKtrmsubject_trmpath
+  foreign key (subject_term_id) references term (term_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index trmpath_objectid
+  on term_path (object_term_id);
+
+create index trmpath_ontid
+  on term_path (ontology_id);
+
+create index trmpath_predicateid
+  on term_path (predicate_term_id);
+
+create table if not exists term_relationship
+(
+  term_relationship_id int unsigned auto_increment
+    primary key,
+  subject_term_id      int unsigned not null,
+  predicate_term_id    int unsigned not null,
+  object_term_id       int unsigned not null,
+  ontology_id          int unsigned not null,
+  constraint subject_term_id
+  unique (subject_term_id, predicate_term_id, object_term_id, ontology_id),
+  constraint FKterm_trmrel
+  foreign key (ontology_id) references ontology (ontology_id)
+    on delete cascade,
+  constraint FKtrmobject_trmrel
+  foreign key (object_term_id) references term (term_id)
+    on delete cascade,
+  constraint FKtrmpredicate_trmrel
+  foreign key (predicate_term_id) references term (term_id)
+    on delete cascade,
+  constraint FKtrmsubject_trmrel
+  foreign key (subject_term_id) references term (term_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create index trmrel_objectid
+  on term_relationship (object_term_id);
+
+create index trmrel_ontid
+  on term_relationship (ontology_id);
+
+create index trmrel_predicateid
+  on term_relationship (predicate_term_id);
+
+create table if not exists term_relationship_term
+(
+  term_relationship_id int unsigned not null
+    primary key,
+  term_id              int unsigned not null,
+  constraint term_id
+  unique (term_id),
+  constraint FKtrm_trmreltrm
+  foreign key (term_id) references term (term_id)
+    on delete cascade,
+  constraint FKtrmrel_trmreltrm
+  foreign key (term_relationship_id) references term_relationship (term_relationship_id)
+    on delete cascade
+)
+  charset = latin1;
+
+create table if not exists term_synonym
+(
+  synonym varchar(255) not null,
+  term_id int unsigned not null,
+  primary key (term_id, synonym),
+  constraint FKterm_syn
+  foreign key (term_id) references term (term_id)
+    on delete cascade
+)
+  charset = latin1;
 
